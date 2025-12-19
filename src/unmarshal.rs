@@ -1,56 +1,8 @@
 //! This module should implement the unmarshalling of python objects.
 //! It is derived from Tools/build/umarshal.py from the python/Cpython repo
 
+use crate::{CodeObjectConstructor, PyObject, PyObjectIndex, PyObjectRegion};
 use std::collections::BTreeSet;
-
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct PyObjectIndex(usize);
-
-#[derive(Debug, PartialEq)]
-enum PyObject {
-    Null,
-    None,
-    Bool(bool),
-    StopIter,
-    Ellipsis,
-    SmallInt(i64),
-    LargeInt(PyLargeInt),
-    Float(f64),
-    Complex(f64, f64),
-    Bytes(Box<[u8]>),
-    String(Box<str>),
-    // These usize indices are here because I'm unclear on the ownership of
-    // the objects stored in these collections.
-    Tuple(Box<[PyObjectIndex]>),
-    List(Box<[PyObjectIndex]>),
-    Dict(Box<[(PyObjectIndex, PyObjectIndex)]>),
-    Set(Box<[PyObjectIndex]>),
-    FrozenSet(Box<[PyObjectIndex]>),
-    Code(CodeObjectConstructor),
-}
-type PyLargeInt = Box<[u8]>;
-
-#[derive(Debug, PartialEq)]
-pub struct CodeObjectConstructor {
-    arg_count: i32,
-    pos_only_arg_count: i32,
-    kw_only_arg_count: i32,
-    stack_size: i32,
-    flags: i32,
-    code: PyObjectIndex,
-    consts: PyObjectIndex,
-    names: PyObjectIndex,
-    // Tuple mapping offsets to names
-    locals_plus_names: PyObjectIndex,
-    // This is a list that corresponds to free and cell flags on locals
-    locals_plus_kinds: PyObjectIndex,
-    filename: PyObjectIndex,
-    name: PyObjectIndex,
-    qualified_name: PyObjectIndex,
-    first_line_no: i32,
-    line_table: PyObjectIndex,
-    exception_table: PyObjectIndex,
-}
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -141,9 +93,6 @@ pub struct Unmarshaller<'a> {
     objects: Vec<PyObject>,
     refables: Vec<usize>,
 }
-
-#[derive(Debug, PartialEq)]
-pub struct PyObjectRegion(Vec<PyObject>);
 
 impl<'a> Unmarshaller<'a> {
     pub fn loads(src: &'a [u8]) -> Result<PyObjectRegion, UnmarshalError> {
