@@ -4,8 +4,12 @@ use std::ops::Index;
 pub struct PyObjectRegion(pub(crate) Vec<PyObject>);
 
 impl PyObjectRegion {
-    fn get(&self, index: PyObjectIndex) -> Option<&PyObject> {
+    pub fn get(&self, index: PyObjectIndex) -> Option<&PyObject> {
         self.0.get(index.0)
+    }
+
+    pub fn root(&self) -> Option<&PyObject> {
+        self.0.get(0)
     }
 }
 
@@ -80,15 +84,102 @@ pub struct CodeObjectConstructor {
 /// will not attempt an out of bound access, or pop from an empty stack, are not
 /// in scope
 #[derive(Debug, PartialEq)]
-pub struct CodeObject(CodeObjectConstructor);
+pub struct CodeObject<'a>(&'a CodeObjectConstructor, &'a PyObjectRegion);
+
+#[derive(Debug, PartialEq)]
+pub struct NameFlags(u8);
+
+impl NameFlags {
+    const FAST_ARG_POS: u8 = 0x02;
+    const FAST_ARG_KW: u8 = 0x04;
+    const FAST_ARG_VAR: u8 = 0x08;
+    const FAST_HIDDEN: u8 = 0x10;
+    const FAST_LOCAL: u8 = 0x20;
+    const FAST_CELL: u8 = 0x40;
+    const FAST_FREE: u8 = 0x80;
+    
+    fn is_local(&self) -> bool {
+        (self.0 & NameFlags::FAST_LOCAL) != 0
+    }
+}
+
+impl<'a> CodeObject<'a> {
+    pub fn code(&self) -> &[u8] {
+        match self.1.get(self.0.code) {
+            Some(PyObject::Bytes(b)) => b.as_ref(),
+            _ => unreachable!(
+                "CodeObjects should only be made when there is proof that their code is valid for their region"
+            ),
+        }
+    }
+
+    pub fn locals(&self) -> impl Iterator<Item = &str> {
+        let Some(PyObject::Tuple(locals_plus_names)) = self.1.get(self.0.locals_plus_names) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that their locals are a tuple"
+                )
+        };
+        locals_plus_names.iter().zip(self.kinds()).filter_map(|(name, kind)| {
+            let Some(PyObject::String(name)) = self.1.get(*name) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that all of their local names are strings"
+                )
+            };
+            
+            if kind.is_local() {
+                Some(name.as_ref())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn globals(&self) -> impl Iterator<Item = &str> {
+        let Some(PyObject::Tuple(globals)) = self.1.get(self.0.names) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that their globals are a tuple"
+                )
+        };
+        globals.iter().map(|name| {
+            let Some(PyObject::String(name)) = self.1.get(*name) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that all of their global names are strings"
+                )
+            };
+            
+            name.as_ref()
+        })
+    }
+
+    pub fn consts(&self) -> impl Iterator<Item = &PyObject> {
+        let Some(PyObject::Tuple(consts)) = self.1.get(self.0.consts) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that thier consts are a tuple"
+                )
+        };
+
+        consts.iter().map(|index| self.1.get(*index).expect("CodeObjects should only be made when there is proof that all of their consts are valid"))
+    }
+
+    fn kinds(&self) -> impl Iterator<Item = NameFlags> {
+        let Some(PyObject::Bytes(locals_plus_kinds)) = self.1.get(self.0.locals_plus_kinds) else {
+                unreachable!(
+                    "CodeObjects should only be made when there is proof that all of their local names are strings"
+                )
+        };
+
+        locals_plus_kinds.iter().map(|n| NameFlags(*n))
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct CodeObjectFlags(i32);
 
 impl CodeObjectFlags {
     /// Returns true if this is a valid set of code object flags
+    // TODO: Actually validate this
     fn validate(_raw: i32) -> bool {
-        todo!()
+        return true;
     }
 }
 
@@ -150,12 +241,12 @@ pub enum CodeObjectConstructionError<'a> {
 }
 
 impl CodeObjectConstructor {
-    /// Consume self and try to create a valid `CodeObject` that wraps this and
+    /// Takes self and try to create a valid `CodeObject` that wraps this and
     /// provides an interface for getting computed properties
-    pub fn construct(
-        self,
-        region: &PyObjectRegion,
-    ) -> Result<CodeObject, CodeObjectConstructionError<'_>> {
+    pub fn construct<'a>(
+        &'a self,
+        region: &'a PyObjectRegion,
+    ) -> Result<CodeObject<'a>, CodeObjectConstructionError<'a>> {
         use CodeObjectConstructionError as CE;
         let Some(code) = region.get(self.code) else {
             return Err(CE::OutOfBoundsIndex(self.code));
@@ -272,6 +363,6 @@ impl CodeObjectConstructor {
             return Err(CE::InvalidFlags(self.flags));
         }
 
-        Ok(CodeObject(self))
+        Ok(CodeObject(self, region))
     }
 }
