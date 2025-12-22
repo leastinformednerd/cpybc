@@ -2,6 +2,7 @@ This is intended to be a version agnostic crate for handling CPython Bytecode, b
 
 Planned features (for static analysis of existing bytecode):
   - [ ] Arbitrary unmarshalling into Rust
+    - [x] Support for 3.14 unmarshalling
   - [ ] `.pyc` file format / magic number support
   - [ ] Abstract interpretation of code objects for Python 3.14
     - [ ] Expanding this to cover older Python versions (cutoff to be determined)
