@@ -1,11 +1,20 @@
 use std::ops::Index;
 
+use crate::{
+    abstract_interpretation::{Place, eval::EvalCtx},
+    stack_ir::UnresolvedPlace,
+};
+
 #[derive(Debug, PartialEq)]
 pub struct PyObjectRegion(pub(crate) Vec<PyObject>);
 
 impl PyObjectRegion {
-    fn get(&self, index: PyObjectIndex) -> Option<&PyObject> {
+    pub fn get(&self, index: PyObjectIndex) -> Option<&PyObject> {
         self.0.get(index.0)
+    }
+
+    pub fn first(&self) -> Option<&PyObject> {
+        self.0.get(0)
     }
 }
 
@@ -80,15 +89,91 @@ pub struct CodeObjectConstructor {
 /// will not attempt an out of bound access, or pop from an empty stack, are not
 /// in scope
 #[derive(Debug, PartialEq)]
-pub struct CodeObject(CodeObjectConstructor);
+pub struct CodeObject<'a>(&'a CodeObjectConstructor);
+impl<'a> CodeObject<'a> {
+    /// Get the co_code field of this code object as a [`&[u8]`](slice)
+    pub fn code(&'a self, region: &'a PyObjectRegion) -> &'a [u8] {
+        match region.get(self.0.code) {
+            Some(PyObject::Bytes(b)) => b,
+            _ => unreachable!(
+                "Objects of type CodeObject should be proof that their code field is a bytes object"
+            ),
+        }
+    }
+
+    pub fn stack_size(&self) -> i32 {
+        self.0.stack_size
+    }
+
+    fn locals(&self, region: &'a PyObjectRegion) -> impl Iterator<Item = &str> {
+        let Some(PyObject::Tuple(locals_plus_names)) = region.get(self.0.locals_plus_names) else {
+            unreachable!()
+        };
+        locals_plus_names
+            .iter()
+            .zip(self.local_flags(region))
+            .filter_map(|(name, kind)| {
+                if !kind.is_local() {
+                    return None;
+                }
+                let Some(PyObject::String(name)) = region.get(*name) else {
+                    unreachable!();
+                };
+                Some(name.as_ref())
+            })
+    }
+
+    fn local_flags(&self, region: &'a PyObjectRegion) -> impl Iterator<Item = LocalFlags> {
+        let Some(PyObject::Bytes(locals_plus_kinds)) = region.get(self.0.locals_plus_kinds) else {
+            unreachable!()
+        };
+        locals_plus_kinds.iter().map(|f| LocalFlags(*f))
+    }
+
+    pub(crate) fn eval_place(&self, place: &UnresolvedPlace, ctx: &EvalCtx) -> Place {
+        match place {
+            UnresolvedPlace::Name(i) => {
+                let Some(PyObject::Tuple(names)) = ctx.region.get(self.0.names) else {
+                    unreachable!()
+                };
+                let Some(PyObject::String(name)) = ctx.region.get(names[*i as usize]) else {
+                    unreachable!()
+                };
+                for (i, local_name) in self.locals(ctx.region).enumerate() {
+                    if local_name == name.as_ref() {
+                        return Place::Local(i as u32);
+                    }
+                }
+                return Place::Global(*i);
+            }
+            place => Place::from_unresolved_unchecked(place),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct LocalFlags(u8);
+
+impl LocalFlags {
+    const ARG_POS: u8 = 0x02;
+    const ARG_KW: u8 = 0x04;
+    const ARG_VAR: u8 = 0x08;
+    const HIDDEN: u8 = 0x10;
+    const LOCAL: u8 = 0x20;
+    const CELL: u8 = 0x40;
+    fn is_local(&self) -> bool {
+        self.0 & Self::LOCAL != 0
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct CodeObjectFlags(i32);
 
 impl CodeObjectFlags {
     /// Returns true if this is a valid set of code object flags
+    // TODO: Actually implement validation
     fn validate(_raw: i32) -> bool {
-        todo!()
+        return true;
     }
 }
 
@@ -100,8 +185,10 @@ pub enum CodeObjectConstructionError<'a> {
     /// attempting to call `CodeObjectConstructor::construct` with a different
     /// region than it was made with is an error, and may cause this
     OutOfBoundsIndex(PyObjectIndex),
-    /// Expected the bytecode string to be bytes, actual is noted
-    ExpectedCodeBytes(&'a PyObject),
+    /// Expected the bytecode string to be bytes with an even length, actual is
+    /// noted. Even length is expected because, since CPython 3.6, instructions
+    /// are stored as pairs of bytes
+    ExpectedCodeEvenLenBytes(&'a PyObject),
     /// Expected the locals_plus_names field to be a tuple of strings, actual
     /// is noted (with the caveat that due to the way that sequences are
     /// represented, the type of any children will not be immediately apparent
@@ -152,16 +239,15 @@ pub enum CodeObjectConstructionError<'a> {
 impl CodeObjectConstructor {
     /// Consume self and try to create a valid `CodeObject` that wraps this and
     /// provides an interface for getting computed properties
-    pub fn construct(
-        self,
-        region: &PyObjectRegion,
-    ) -> Result<CodeObject, CodeObjectConstructionError<'_>> {
+    pub fn construct<'a>(
+        &'a self,
+        region: &'a PyObjectRegion,
+    ) -> Result<CodeObject<'a>, CodeObjectConstructionError<'a>> {
         use CodeObjectConstructionError as CE;
-        let Some(code) = region.get(self.code) else {
-            return Err(CE::OutOfBoundsIndex(self.code));
-        };
-        if !code.is_bytes() {
-            return Err(CE::ExpectedCodeBytes(code));
+        match region.get(self.code) {
+            None => return Err(CE::OutOfBoundsIndex(self.code)),
+            Some(PyObject::Bytes(b)) if b.len() % 2 == 0 => {}
+            Some(other_obj) => return Err(CE::ExpectedCodeEvenLenBytes(other_obj)),
         }
 
         let (locals_plus_names_obj, locals_plus_names) = match region.get(self.locals_plus_names) {
