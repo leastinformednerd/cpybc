@@ -1,7 +1,7 @@
 //! This module should implement the unmarshalling of python objects.
 //! It is derived from Tools/build/umarshal.py from the python/Cpython repo
 
-use crate::{CodeObjectConstructor, PyObject, PyObjectIndex, PyObjectRegion};
+use crate::{CodeObjectConstructor, InitialPyObjectRegion, PyObject, PyObjectIndex};
 use std::collections::BTreeSet;
 
 #[repr(u8)]
@@ -90,12 +90,12 @@ pub enum UnmarshalError {
 #[derive(Debug)]
 pub struct Unmarshaller<'a> {
     src: &'a [u8],
-    objects: Vec<PyObject>,
+    objects: Vec<PyObject<CodeObjectConstructor>>,
     refables: Vec<usize>,
 }
 
 impl<'a> Unmarshaller<'a> {
-    pub fn loads(src: &'a [u8]) -> Result<PyObjectRegion, UnmarshalError> {
+    pub fn loads(src: &'a [u8]) -> Result<InitialPyObjectRegion, UnmarshalError> {
         let mut this = Unmarshaller {
             src,
             objects: Vec::new(),
@@ -105,7 +105,7 @@ impl<'a> Unmarshaller<'a> {
 
         assert_eq!(obj.0, 0);
 
-        Ok(PyObjectRegion(this.objects))
+        Ok(InitialPyObjectRegion::new(this.objects))
     }
 
     fn get_byte(&mut self) -> Result<u8, UnmarshalError> {
@@ -242,7 +242,7 @@ impl<'a> Unmarshaller<'a> {
         Ok(PyObjectIndex(idx))
     }
 
-    fn parse_str(&mut self) -> Result<PyObject, UnmarshalError> {
+    fn parse_str(&mut self) -> Result<PyObject<CodeObjectConstructor>, UnmarshalError> {
         let s = self.get_str()?;
         match str::from_utf8(s) {
             Ok(s) => Ok(PyObject::String(s.into())),
@@ -253,7 +253,7 @@ impl<'a> Unmarshaller<'a> {
     fn parse_sequence(
         &mut self,
         flag: bool,
-        constructor: fn(Box<[PyObjectIndex]>) -> PyObject,
+        constructor: fn(Box<[PyObjectIndex]>) -> PyObject<CodeObjectConstructor>,
     ) -> Result<PyObjectIndex, UnmarshalError> {
         let idx = self.objects.len();
         self.objects.push(PyObject::Null);
@@ -319,7 +319,7 @@ impl<'a> Unmarshaller<'a> {
         Ok(PyObjectIndex(idx))
     }
 
-    fn parse_cstr(&mut self) -> Result<PyObject, UnmarshalError> {
+    fn parse_cstr(&mut self) -> Result<PyObject<CodeObjectConstructor>, UnmarshalError> {
         let Ok(s1) = str::from_utf8(self.get_short_str()?) else {
             return Err(UnmarshalError::DecodingError);
         };
@@ -336,7 +336,7 @@ impl<'a> Unmarshaller<'a> {
         }
     }
 
-    fn parse_fstr(&mut self) -> Result<PyObject, UnmarshalError> {
+    fn parse_fstr(&mut self) -> Result<PyObject<CodeObjectConstructor>, UnmarshalError> {
         let Ok(s) = str::from_utf8(self.get_short_str()?) else {
             return Err(UnmarshalError::DecodingError);
         };
@@ -359,6 +359,8 @@ impl<'a> Unmarshaller<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::objects::PyObjectRegion;
+
     use super::*;
     use pretty_assertions::assert_eq;
 

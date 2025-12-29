@@ -5,8 +5,11 @@
 
 use crate::{
     abstract_interpretation::ControlFlow,
-    objects::{CodeObject, PyObjectRegion},
-    stack_ir::{self, Instruction, JumpClass},
+    objects::{CodeObject, InitialPyObjectRegion, PyObject, PyObjectIndex, PyObjectRegion},
+    stack_ir::{
+        self, Instruction, JumpClass,
+        parse::{self, parse314},
+    },
 };
 
 use super::{Block, Expr, Statement};
@@ -17,8 +20,8 @@ use std::{
 
 pub(crate) struct EvalCtx<'a> {
     code: Box<[Instruction]>,
-    code_obj: &'a CodeObject<'a>,
-    pub(crate) region: &'a PyObjectRegion,
+    code_obj: &'a CodeObject,
+    pub(crate) region: &'a PyObjectRegion<CodeObject>,
 
     stack: Vec<Expr>,
     out_blocks: HashMap<u32, Block>,
@@ -28,8 +31,8 @@ impl<'a> EvalCtx<'a> {
     fn new(
         code: Box<[Instruction]>,
         max_stack: usize,
-        code_obj: &'a CodeObject<'a>,
-        region: &'a PyObjectRegion,
+        code_obj: &'a CodeObject,
+        region: &'a PyObjectRegion<CodeObject>,
     ) -> EvalCtx<'a> {
         EvalCtx {
             code,
@@ -41,12 +44,6 @@ impl<'a> EvalCtx<'a> {
     }
 
     fn go(&mut self) -> Result<(), EvaluationError> {
-        for block in self.blocks() {
-            println!(
-                "{:#?}",
-                &self.code[block.start as usize..block.end as usize]
-            );
-        }
         for block in self.blocks() {
             let start = block.start;
             let block = self.process_block(block)?;
@@ -251,18 +248,39 @@ impl From<stack_ir::parse::IRParseError> for EvaluationError {
     }
 }
 
-pub fn eval314(
-    input: CodeObject,
-    region: &PyObjectRegion,
-) -> Result<HashMap<u32, Block>, EvaluationError> {
-    let instrs = stack_ir::parse::parse314(input.code(&region))?;
-    let mut ctx = EvalCtx::new(
-        instrs.into_boxed_slice(),
-        input.stack_size() as usize,
-        &input,
-        region,
-    );
-    ctx.go()?;
+#[derive(Debug)]
+pub struct EvalledCodeObject {
+    pub out_blocks: HashMap<u32, Block>,
+    pub code_object: CodeObject,
+    pub idx: PyObjectIndex,
+}
 
-    Ok(ctx.out_blocks)
+pub type EvalledRegion = PyObjectRegion<EvalledCodeObject>;
+
+pub fn eval314(region: PyObjectRegion<CodeObject>) -> Result<EvalledRegion, EvaluationError> {
+    let region = region
+        .0
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(idx, obj)| {
+            obj.map_res(|co| {
+                let mut ctx = EvalCtx::new(
+                    parse314(co.code(&region))?.into_boxed_slice(),
+                    co.stack_size() as usize,
+                    &co,
+                    &region,
+                );
+                ctx.go()?;
+
+                Ok(EvalledCodeObject {
+                    out_blocks: ctx.out_blocks,
+                    code_object: co,
+                    idx: PyObjectIndex(idx as usize),
+                })
+            })
+        })
+        .collect::<Result<Vec<PyObject<EvalledCodeObject>>, EvaluationError>>()?;
+
+    Ok(EvalledRegion::new(region))
 }

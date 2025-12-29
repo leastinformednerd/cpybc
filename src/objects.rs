@@ -6,20 +6,56 @@ use crate::{
 };
 
 #[derive(Debug, PartialEq)]
-pub struct PyObjectRegion(pub(crate) Vec<PyObject>);
+pub struct PyObjectRegion<CO>(pub(crate) Vec<PyObject<CO>>);
+pub type InitialPyObjectRegion = PyObjectRegion<CodeObjectConstructor>;
 
-impl PyObjectRegion {
-    pub fn get(&self, index: PyObjectIndex) -> Option<&PyObject> {
+impl<CO> PyObjectRegion<CO> {
+    pub fn new(obj: Vec<PyObject<CO>>) -> Self {
+        PyObjectRegion(obj)
+    }
+
+    pub fn get(&self, index: PyObjectIndex) -> Option<&PyObject<CO>> {
         self.0.get(index.0)
     }
 
-    pub fn first(&self) -> Option<&PyObject> {
+    pub fn first(&self) -> Option<&PyObject<CO>> {
         self.0.get(0)
     }
 }
 
-impl Index<PyObjectIndex> for PyObjectRegion {
-    type Output = PyObject;
+impl PyObjectRegion<CodeObjectConstructor> {
+    pub fn construct<'a>(
+        &'a self,
+    ) -> Result<PyObjectRegion<CodeObject>, CodeObjectConstructionError<'a>> {
+        let mut region = Vec::with_capacity(self.0.len());
+        for obj in &self.0 {
+            region.push(match obj {
+                PyObject::Null => PyObject::Null,
+                PyObject::None => PyObject::None,
+                PyObject::Bool(b) => PyObject::Bool(*b),
+                PyObject::StopIter => PyObject::StopIter,
+                PyObject::Ellipsis => PyObject::Ellipsis,
+                PyObject::SmallInt(n) => PyObject::SmallInt(*n),
+                PyObject::LargeInt(items) => PyObject::LargeInt(items.clone()),
+                PyObject::Float(f) => PyObject::Float(*f),
+                PyObject::Complex(r, i) => PyObject::Complex(*r, *i),
+                PyObject::Bytes(items) => PyObject::Bytes(items.clone()),
+                PyObject::String(s) => PyObject::String(s.clone()),
+                PyObject::Tuple(items) => PyObject::Tuple(items.clone()),
+                PyObject::List(items) => PyObject::List(items.clone()),
+                PyObject::Dict(items) => PyObject::Dict(items.clone()),
+                PyObject::Set(items) => PyObject::Set(items.clone()),
+                PyObject::FrozenSet(items) => PyObject::FrozenSet(items.clone()),
+                PyObject::Code(co) => PyObject::Code(co.construct(self)?),
+            })
+        }
+
+        Ok(PyObjectRegion::new(region))
+    }
+}
+
+impl<CO> Index<PyObjectIndex> for PyObjectRegion<CO> {
+    type Output = PyObject<CO>;
 
     fn index(&self, index: PyObjectIndex) -> &Self::Output {
         &self.0[index.0]
@@ -29,8 +65,8 @@ impl Index<PyObjectIndex> for PyObjectRegion {
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Clone, Copy)]
 pub struct PyObjectIndex(pub usize);
 
-#[derive(Debug, PartialEq)]
-pub enum PyObject {
+#[derive(Debug, PartialEq, Clone)]
+pub enum PyObject<CO> {
     Null,
     None,
     Bool(bool),
@@ -47,21 +83,60 @@ pub enum PyObject {
     Dict(Box<[(PyObjectIndex, PyObjectIndex)]>),
     Set(Box<[PyObjectIndex]>),
     FrozenSet(Box<[PyObjectIndex]>),
-    Code(CodeObjectConstructor),
+    Code(CO),
 }
 type PyLargeInt = Box<[u8]>;
 
-impl PyObject {
-    fn is_bytes(&self) -> bool {
-        if let PyObject::Bytes(_) = self {
-            true
-        } else {
-            false
+impl<CO> PyObject<CO> {
+    pub fn map<NewCO>(self, f: impl Fn(CO) -> NewCO) -> PyObject<NewCO> {
+        match self {
+            PyObject::Null => PyObject::Null,
+            PyObject::None => PyObject::None,
+            PyObject::Bool(b) => PyObject::Bool(b),
+            PyObject::StopIter => PyObject::StopIter,
+            PyObject::Ellipsis => PyObject::Ellipsis,
+            PyObject::SmallInt(n) => PyObject::SmallInt(n),
+            PyObject::LargeInt(items) => PyObject::LargeInt(items),
+            PyObject::Float(f) => PyObject::Float(f),
+            PyObject::Complex(r, i) => PyObject::Complex(r, i),
+            PyObject::Bytes(items) => PyObject::Bytes(items),
+            PyObject::String(s) => PyObject::String(s),
+            PyObject::Tuple(items) => PyObject::Tuple(items),
+            PyObject::List(items) => PyObject::List(items),
+            PyObject::Dict(items) => PyObject::Dict(items),
+            PyObject::Set(items) => PyObject::Set(items),
+            PyObject::FrozenSet(items) => PyObject::FrozenSet(items),
+            PyObject::Code(co) => PyObject::Code(f(co)),
         }
+    }
+
+    pub fn map_res<NewCO, E>(
+        self,
+        f: impl Fn(CO) -> Result<NewCO, E>,
+    ) -> Result<PyObject<NewCO>, E> {
+        Ok(match self {
+            PyObject::Null => PyObject::Null,
+            PyObject::None => PyObject::None,
+            PyObject::Bool(b) => PyObject::Bool(b),
+            PyObject::StopIter => PyObject::StopIter,
+            PyObject::Ellipsis => PyObject::Ellipsis,
+            PyObject::SmallInt(n) => PyObject::SmallInt(n),
+            PyObject::LargeInt(items) => PyObject::LargeInt(items.clone()),
+            PyObject::Float(f) => PyObject::Float(f),
+            PyObject::Complex(r, i) => PyObject::Complex(r, i),
+            PyObject::Bytes(items) => PyObject::Bytes(items),
+            PyObject::String(s) => PyObject::String(s),
+            PyObject::Tuple(items) => PyObject::Tuple(items),
+            PyObject::List(items) => PyObject::List(items),
+            PyObject::Dict(items) => PyObject::Dict(items),
+            PyObject::Set(items) => PyObject::Set(items),
+            PyObject::FrozenSet(items) => PyObject::FrozenSet(items),
+            PyObject::Code(co) => PyObject::Code(f(co)?),
+        })
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CodeObjectConstructor {
     pub(crate) arg_count: i32,
     pub(crate) pos_only_arg_count: i32,
@@ -88,25 +163,15 @@ pub struct CodeObjectConstructor {
 /// type and trivial length checks pass). Things like validating that the code
 /// will not attempt an out of bound access, or pop from an empty stack, are not
 /// in scope
-#[derive(Debug, PartialEq)]
-pub struct CodeObject<'a>(&'a CodeObjectConstructor);
-impl<'a> CodeObject<'a> {
-    /// Get the co_code field of this code object as a [`&[u8]`](slice)
-    pub fn code(&'a self, region: &'a PyObjectRegion) -> &'a [u8] {
-        match region.get(self.0.code) {
-            Some(PyObject::Bytes(b)) => b,
-            _ => unreachable!(
-                "Objects of type CodeObject should be proof that their code field is a bytes object"
-            ),
-        }
-    }
-
-    pub fn stack_size(&self) -> i32 {
-        self.0.stack_size
-    }
-
-    fn locals(&self, region: &'a PyObjectRegion) -> impl Iterator<Item = &str> {
-        let Some(PyObject::Tuple(locals_plus_names)) = region.get(self.0.locals_plus_names) else {
+#[derive(Debug, PartialEq, Clone)]
+pub struct CodeObject(CodeObjectConstructor);
+impl CodeObject {
+    pub fn locals<'a, CO>(
+        &'a self,
+        region: &'a PyObjectRegion<CO>,
+    ) -> impl Iterator<Item = &'a str> {
+        let co = &self.0;
+        let Some(PyObject::Tuple(locals_plus_names)) = region.get(co.locals_plus_names) else {
             unreachable!()
         };
         locals_plus_names
@@ -123,11 +188,67 @@ impl<'a> CodeObject<'a> {
             })
     }
 
-    fn local_flags(&self, region: &'a PyObjectRegion) -> impl Iterator<Item = LocalFlags> {
-        let Some(PyObject::Bytes(locals_plus_kinds)) = region.get(self.0.locals_plus_kinds) else {
+    pub fn globals<'a, CO>(
+        &'a self,
+        region: &'a PyObjectRegion<CO>,
+    ) -> impl Iterator<Item = &'a str> {
+        let Some(PyObject::Tuple(globals)) = region.get(self.0.names) else {
+            unreachable!()
+        };
+        globals.iter().map(|name| {
+            let Some(PyObject::String(name)) = region.get(*name) else {
+                unreachable!();
+            };
+            name.as_ref()
+        })
+    }
+
+    pub fn nth_global<'a, CO>(&'a self, region: &'a PyObjectRegion<CO>, n: usize) -> &'a str {
+        let Some(PyObject::Tuple(globals)) = region.get(self.0.names) else {
+            unreachable!()
+        };
+        let Some(PyObject::String(name)) = region.get(globals[n]) else {
+            unreachable!()
+        };
+        name
+    }
+
+    fn local_flags<CO>(&self, region: &PyObjectRegion<CO>) -> impl Iterator<Item = LocalFlags> {
+        let co = &self.0;
+        let Some(PyObject::Bytes(locals_plus_kinds)) = region.get(co.locals_plus_kinds) else {
             unreachable!()
         };
         locals_plus_kinds.iter().map(|f| LocalFlags(*f))
+    }
+
+    pub fn arg_count(&self) -> i32 {
+        self.0.arg_count
+    }
+
+    pub fn pos_only_arg_count(&self) -> i32 {
+        self.0.pos_only_arg_count
+    }
+
+    pub fn kw_only_arg_count(&self) -> i32 {
+        self.0.kw_only_arg_count
+    }
+
+    pub fn stack_size(&self) -> i32 {
+        self.0.stack_size
+    }
+
+    pub fn flags(&self) -> CodeObjectFlags {
+        CodeObjectFlags(self.0.flags)
+    }
+
+    /// Get the co_code field of this code object as a [`&[u8]`](slice)
+    pub fn code<'a, CO>(&'a self, region: &'a PyObjectRegion<CO>) -> &'a [u8] {
+        match region.get(self.0.code) {
+            Some(PyObject::Bytes(b)) => b,
+            _ => unreachable!(
+                "Objects of type CodeObject should be proof that their code field is a bytes object"
+            ),
+        }
     }
 
     pub(crate) fn eval_place(&self, place: &UnresolvedPlace, ctx: &EvalCtx) -> Place {
@@ -188,13 +309,13 @@ pub enum CodeObjectConstructionError<'a> {
     /// Expected the bytecode string to be bytes with an even length, actual is
     /// noted. Even length is expected because, since CPython 3.6, instructions
     /// are stored as pairs of bytes
-    ExpectedCodeEvenLenBytes(&'a PyObject),
+    ExpectedCodeEvenLenBytes(&'a PyObject<CodeObjectConstructor>),
     /// Expected the locals_plus_names field to be a tuple of strings, actual
     /// is noted (with the caveat that due to the way that sequences are
     /// represented, the type of any children will not be immediately apparent
-    ExpectedLocalsTupleOfStrings(&'a PyObject),
+    ExpectedLocalsTupleOfStrings(&'a PyObject<CodeObjectConstructor>),
     /// Expected the locals_plus_kinds to be bytes, actual is noted
-    ExpectedLocalsBytes(&'a PyObject),
+    ExpectedLocalsBytes(&'a PyObject<CodeObjectConstructor>),
     /// Expected locals_plus_names and locals_plus_kinds to have equal length,
     /// their actual lengths are noted
     LocalsSizeMismatch { names_len: usize, kinds_len: usize },
@@ -212,24 +333,24 @@ pub enum CodeObjectConstructionError<'a> {
     },
     /// Expected names to be a tuple, actual is noted, same caveats apply as to
     /// the equivalent for locals in terms of children
-    ExpectedNamesTupleOfStrings(&'a PyObject),
+    ExpectedNamesTupleOfStrings(&'a PyObject<CodeObjectConstructor>),
     /// Expected consts to be a tuple, actual is noted
-    ExpectedConstsTuple(&'a PyObject),
+    ExpectedConstsTuple(&'a PyObject<CodeObjectConstructor>),
     /// Expected filename to be a string, actual is noted
-    ExpectedFileNameString(&'a PyObject),
+    ExpectedFileNameString(&'a PyObject<CodeObjectConstructor>),
     /// Expected qualified name to be a string, actual is noted
-    ExpectedQualifiedNameString(&'a PyObject),
+    ExpectedQualifiedNameString(&'a PyObject<CodeObjectConstructor>),
     /// Expected name to be a subtstring of the qualified name, actual is noted
     // I am not entirely sure that this actually true of all names / qualnames
     // that are created by CPython, but I can't imagine where it wouldn't be
     // valid, and I'll relax the requirement if it comes up
-    ExpectedNameSubstringQualifiedName(&'a PyObject),
+    ExpectedNameSubstringQualifiedName(&'a PyObject<CodeObjectConstructor>),
     /// Expected first line number to be greater than 0, actual is noted
     ExpectedLineNoGtZero(i32),
     /// Expected the line table to be bytes, actual is noted
-    ExpectedLineTableBytes(&'a PyObject),
+    ExpectedLineTableBytes(&'a PyObject<CodeObjectConstructor>),
     /// Expected the exception table to be bytes, actual is noted
-    ExpectedExceptionTableBytes(&'a PyObject),
+    ExpectedExceptionTableBytes(&'a PyObject<CodeObjectConstructor>),
     /// Expected stack size to be at least 0, actual is noted
     ExpectedStackSize(i32),
     /// Flags are invalid / inconsistent
@@ -241,8 +362,8 @@ impl CodeObjectConstructor {
     /// provides an interface for getting computed properties
     pub fn construct<'a>(
         &'a self,
-        region: &'a PyObjectRegion,
-    ) -> Result<CodeObject<'a>, CodeObjectConstructionError<'a>> {
+        region: &'a InitialPyObjectRegion,
+    ) -> Result<CodeObject, CodeObjectConstructionError<'a>> {
         use CodeObjectConstructionError as CE;
         match region.get(self.code) {
             None => return Err(CE::OutOfBoundsIndex(self.code)),
@@ -358,6 +479,6 @@ impl CodeObjectConstructor {
             return Err(CE::InvalidFlags(self.flags));
         }
 
-        Ok(CodeObject(self))
+        Ok(CodeObject(self.clone()))
     }
 }

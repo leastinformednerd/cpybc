@@ -40,6 +40,7 @@ pub enum Expr {
 }
 
 #[derive(Debug)]
+// TODO: Make it type safe that If and Jump don't appear after block formation pass
 pub enum Statement {
     Trivial(Expr),
     Store { expr: Expr, into: Place },
