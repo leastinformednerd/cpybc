@@ -213,6 +213,13 @@ impl CodeObject {
         name
     }
 
+    pub fn nth_const<CO>(&self, region: &PyObjectRegion<CO>, n: usize) -> PyObjectIndex {
+        let Some(PyObject::Tuple(consts)) = region.get(self.0.consts) else {
+            unreachable!()
+        };
+        consts[n]
+    }
+
     fn local_flags<CO>(&self, region: &PyObjectRegion<CO>) -> impl Iterator<Item = LocalFlags> {
         let co = &self.0;
         let Some(PyObject::Bytes(locals_plus_kinds)) = region.get(co.locals_plus_kinds) else {
