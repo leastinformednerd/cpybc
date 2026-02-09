@@ -3,8 +3,9 @@
 //! statements which optionally take an expression
 //!
 //! Expressions are recursively defined as being the results of loads, either
-//! of constants or of variables. No tracking is done here about data flow
-//! between uses of a variable
+//! of constants or of variables and of operations on exprs.
+//!
+//! No tracking is done here about data flow between uses of a variable
 
 // TODO: Move these out to a common core
 use crate::stack_ir::{BinOp, Coercion, Constant, UnaryOp, UnresolvedPlace};
